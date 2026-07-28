@@ -1,14 +1,11 @@
-from __future__ import annotations
-
 import argparse
 import asyncio
 import json
-from dataclasses import dataclass
-from typing import Any
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 
@@ -16,103 +13,218 @@ from prompt_toolkit.styles import Style
 STYLE = Style.from_dict(
     {
         "prompt": "ansicyan bold",
+        "info": "ansiblue",
+        "log": "ansiwhite",
         "result": "ansigreen",
         "error": "ansired bold",
-        "info": "ansiblue",
     }
 )
 
 
-@dataclass(frozen=True)
-class Config:
-    host: str
-    port: int
+async def send_json(writer: asyncio.StreamWriter, message: dict) -> None:
+    """Envoie un objet JSON terminé par un saut de ligne."""
+    text = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+    writer.write((text + "\n").encode("utf-8"))
+    await writer.drain()
 
 
-async def read_message(reader: asyncio.StreamReader) -> dict[str, Any] | None:
+async def read_json(reader: asyncio.StreamReader) -> dict:
+    """Lit un objet JSON terminé par un saut de ligne."""
     raw = await reader.readline()
     if not raw:
-        return None
+        raise ConnectionError("Unity closed the connection.")
     return json.loads(raw.decode("utf-8"))
 
 
-async def run_terminal(config: Config) -> None:
+class CommandChannel:
+    """Dialogue ordonné requête/réponse sur la connexion de commande."""
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        self.reader = reader
+        self.writer = writer
+
+        # Une seule requête à la fois : sa prochaine réponse lui appartient.
+        self.lock = asyncio.Lock()
+
+    async def request(self, request_type: str, text: str) -> dict:
+        async with self.lock:
+            await send_json(
+                self.writer,
+                {"type": request_type, "text": text},
+            )
+            return await read_json(self.reader)
+
+
+class UnityCompleter(Completer):
+    """Quand TAB est pressé, demande les propositions à Unity."""
+
+    def __init__(self, command_channel: CommandChannel) -> None:
+        self.command_channel = command_channel
+
+    async def get_completions_async(
+        self,
+        document: Document,
+        complete_event,
+    ):
+        text = document.text_before_cursor
+        response = await self.command_channel.request("complete", text)
+
+        word = document.get_word_before_cursor()
+        for candidate in response.get("candidates", []):
+            yield Completion(
+                str(candidate),
+                start_position=-len(word),
+            )
+
+    def get_completions(self, document: Document, complete_event):
+        # prompt_toolkit demande cette méthode, mais nous utilisons sa version async.
+        return []
+
+
+async def command_dialogue(
+    session: PromptSession,
+    command_channel: CommandChannel,
+) -> None:
+    """Affiche le prompt, exécute avec ENTRÉE, puis attend le résultat."""
+    while True:
+        try:
+            command = await session.prompt_async(
+                HTML("<prompt>term&gt; </prompt>")
+            )
+        except KeyboardInterrupt:
+            continue
+        except EOFError:
+            command = "quit"
+
+        # Pendant cette attente, aucun nouveau prompt n'est affiché.
+        # En revanche, log_loop continue sur l'autre connexion.
+        response = await command_channel.request("execute", command)
+
+        message_type = str(response.get("type", "result"))
+        text = str(response.get("text", ""))
+        if text:
+            print_message(message_type, text)
+
+        if response.get("close"):
+            return
+
+
+async def log_loop(reader: asyncio.StreamReader) -> None:
+    """Écoute uniquement la connexion réservée aux logs Unity."""
+    while True:
+        message = await read_json(reader)
+        message_type = str(message.get("type", "log"))
+        text = str(message.get("text", ""))
+
+        if text:
+            print_message(message_type, text)
+
+
+async def run_client(
+    host: str,
+    command_port: int,
+    log_port: int,
+) -> None:
+    command_writer = None
+    log_writer = None
+
     try:
-        reader, writer = await asyncio.open_connection(config.host, config.port)
+        # Connexion 1 : TAB, exécution et réponses.
+        command_reader, command_writer = await asyncio.open_connection(
+            host,
+            command_port,
+        )
+
+        # Connexion 2 : réception indépendante des logs.
+        log_reader, log_writer = await asyncio.open_connection(
+            host,
+            log_port,
+        )
     except OSError as error:
-        print_formatted("error", f"Connection failed: {error}")
+        if command_writer is not None:
+            command_writer.close()
+            await command_writer.wait_closed()
+
+        print_message("error", f"Connection failed: {error}")
         return
 
-    session: PromptSession[str] = PromptSession(
-        history=FileHistory(".term_history"),
+    command_channel = CommandChannel(command_reader, command_writer)
+    session = PromptSession(
         style=STYLE,
+        completer=UnityCompleter(command_channel),
+        complete_while_typing=False,
     )
 
+    # Le dialogue de commande et les logs tournent simultanément,
+    # mais sur deux connexions différentes.
+    command_task = asyncio.create_task(
+        command_dialogue(session, command_channel)
+    )
+    log_task = asyncio.create_task(log_loop(log_reader))
+
     try:
-        welcome = await read_message(reader)
-        if welcome:
-            print_formatted("info", str(welcome.get("text", "")))
-
         with patch_stdout():
-            while True:
-                try:
-                    command = await session.prompt_async(
-                        HTML("<prompt>term&gt; </prompt>")
-                    )
-                except (EOFError, KeyboardInterrupt):
-                    command = "quit"
+            done, pending = await asyncio.wait(
+                {command_task, log_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
 
-                request = json.dumps(
-                    {"type": "command", "text": command},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                writer.write((request + "\n").encode("utf-8"))
-                await writer.drain()
+            for task in pending:
+                task.cancel()
 
-                response = await read_message(reader)
-                if response is None:
-                    print_formatted("error", "Server closed the connection.")
-                    break
+            await asyncio.gather(*pending, return_exceptions=True)
 
-                message_type = str(response.get("type", "result"))
-                text = str(response.get("text", ""))
-                if text:
-                    print_formatted(
-                        "error" if message_type == "error" else "result",
-                        text,
-                    )
-
-                if response.get("close"):
-                    break
+            for result in await asyncio.gather(*done, return_exceptions=True):
+                if isinstance(result, Exception):
+                    raise result
     except (ConnectionError, json.JSONDecodeError) as error:
-        print_formatted("error", f"Connection lost: {error}")
+        print_message("error", str(error))
     finally:
-        writer.close()
-        await writer.wait_closed()
+        command_writer.close()
+        log_writer.close()
+        await asyncio.gather(
+            command_writer.wait_closed(),
+            log_writer.wait_closed(),
+            return_exceptions=True,
+        )
 
 
-def print_formatted(style_class: str, text: str) -> None:
+def print_message(message_type: str, text: str) -> None:
     from prompt_toolkit import print_formatted_text
 
-    print_formatted_text(HTML(f"<{style_class}>{html_escape(text)}</{style_class}>"), style=STYLE)
+    style = message_type
+    if style not in {"prompt", "info", "log", "result", "error"}:
+        style = "info"
 
-
-def html_escape(text: str) -> str:
-    return (
+    escaped = (
         text.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+    print_formatted_text(
+        HTML(f"<{style}>{escaped}</{style}>"),
+        style=STYLE,
+    )
 
 
-def parse_args() -> Config:
-    parser = argparse.ArgumentParser(description="TERM TCP client")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Unity TERM client")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=5050)
-    args = parser.parse_args()
-    return Config(args.host, args.port)
+    parser.add_argument("--command-port", type=int, default=5050)
+    parser.add_argument("--log-port", type=int, default=5051)
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    asyncio.run(run_terminal(parse_args()))
+    arguments = parse_args()
+    asyncio.run(
+        run_client(
+            arguments.host,
+            arguments.command_port,
+            arguments.log_port,
+        )
+    )
