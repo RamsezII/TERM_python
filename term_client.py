@@ -39,11 +39,7 @@ async def read_json(reader: asyncio.StreamReader) -> dict:
 class CommandChannel:
     """Dialogue ordonné requête/réponse sur la connexion de commande."""
 
-    def __init__(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.reader = reader
         self.writer = writer
 
@@ -52,10 +48,7 @@ class CommandChannel:
 
     async def request(self, request_type: str, text: str) -> dict:
         async with self.lock:
-            await send_json(
-                self.writer,
-                {"type": request_type, "text": text},
-            )
+            await send_json(self.writer, {"type": request_type, "text": text})
             return await read_json(self.reader)
 
 
@@ -65,36 +58,24 @@ class UnityCompleter(Completer):
     def __init__(self, command_channel: CommandChannel) -> None:
         self.command_channel = command_channel
 
-    async def get_completions_async(
-        self,
-        document: Document,
-        complete_event,
-    ):
+    async def get_completions_async(self, document: Document, complete_event):
         text = document.text_before_cursor
         response = await self.command_channel.request("complete", text)
 
         word = document.get_word_before_cursor()
         for candidate in response.get("candidates", []):
-            yield Completion(
-                str(candidate),
-                start_position=-len(word),
-            )
+            yield Completion(str(candidate), start_position=-len(word))
 
     def get_completions(self, document: Document, complete_event):
         # prompt_toolkit demande cette méthode, mais nous utilisons sa version async.
         return []
 
 
-async def command_dialogue(
-    session: PromptSession,
-    command_channel: CommandChannel,
-) -> None:
+async def command_dialogue(session: PromptSession, command_channel: CommandChannel) -> None:
     """Affiche le prompt, exécute avec ENTRÉE, puis attend le résultat."""
     while True:
         try:
-            command = await session.prompt_async(
-                HTML("<prompt>term&gt; </prompt>")
-            )
+            command = await session.prompt_async(HTML("<prompt>term&gt; </prompt>"))
         except KeyboardInterrupt:
             continue
         except EOFError:
@@ -121,26 +102,16 @@ async def log_loop(reader: asyncio.StreamReader) -> None:
             print_message(message_type, text)
 
 
-async def run_client(
-    host: str,
-    command_port: int,
-    log_port: int,
-) -> None:
+async def run_client(host: str, command_port: int, log_port: int) -> None:
     command_writer = None
     log_writer = None
 
     try:
         # Connexion 1 : TAB, exécution et réponses.
-        command_reader, command_writer = await asyncio.open_connection(
-            host,
-            command_port,
-        )
+        command_reader, command_writer = await asyncio.open_connection(host, command_port)
 
         # Connexion 2 : réception indépendante des logs.
-        log_reader, log_writer = await asyncio.open_connection(
-            host,
-            log_port,
-        )
+        log_reader, log_writer = await asyncio.open_connection(host, log_port)
     except OSError as error:
         if command_writer is not None:
             command_writer.close()
@@ -150,25 +121,16 @@ async def run_client(
         return
 
     command_channel = CommandChannel(command_reader, command_writer)
-    session = PromptSession(
-        style=STYLE,
-        completer=UnityCompleter(command_channel),
-        complete_while_typing=False,
-    )
+    session = PromptSession(style=STYLE, completer=UnityCompleter(command_channel), complete_while_typing=False)
 
     # Le dialogue de commande et les logs tournent simultanément,
     # mais sur deux connexions différentes.
-    command_task = asyncio.create_task(
-        command_dialogue(session, command_channel)
-    )
+    command_task = asyncio.create_task(command_dialogue(session, command_channel))
     log_task = asyncio.create_task(log_loop(log_reader))
 
     try:
         with patch_stdout():
-            done, pending = await asyncio.wait(
-                {command_task, log_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            done, pending = await asyncio.wait({command_task, log_task}, return_when=asyncio.FIRST_COMPLETED)
 
             for task in pending:
                 task.cancel()
@@ -178,16 +140,14 @@ async def run_client(
             for result in await asyncio.gather(*done, return_exceptions=True):
                 if isinstance(result, Exception):
                     raise result
+
     except (ConnectionError, json.JSONDecodeError) as error:
         print_message("error", str(error))
+
     finally:
         command_writer.close()
         log_writer.close()
-        await asyncio.gather(
-            command_writer.wait_closed(),
-            log_writer.wait_closed(),
-            return_exceptions=True,
-        )
+        await asyncio.gather(command_writer.wait_closed(), log_writer.wait_closed(), return_exceptions=True)
 
 
 def print_message(message_type: str, text: str) -> None:
@@ -202,10 +162,7 @@ def print_message(message_type: str, text: str) -> None:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
-    print_formatted_text(
-        HTML(f"<{style}>{escaped}</{style}>"),
-        style=STYLE,
-    )
+    print_formatted_text(HTML(f"<{style}>{escaped}</{style}>"), style=STYLE)
 
 
 def parse_args() -> argparse.Namespace:
@@ -218,10 +175,4 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     arguments = parse_args()
-    asyncio.run(
-        run_client(
-            arguments.host,
-            arguments.command_port,
-            arguments.log_port,
-        )
-    )
+    asyncio.run(run_client(arguments.host, arguments.command_port, arguments.log_port))
