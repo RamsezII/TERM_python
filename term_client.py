@@ -109,9 +109,6 @@ async def command_dialogue(
         if text:
             print_message(message_type, text)
 
-        if response.get("close"):
-            return
-
 
 async def log_loop(reader: asyncio.StreamReader) -> None:
     """Écoute uniquement la connexion réservée aux logs Unity."""
