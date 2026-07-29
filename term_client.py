@@ -121,7 +121,7 @@ async def run_client(host: str, command_port: int, log_port: int) -> None:
         if intro.get("type") != "intro":
             raise ConnectionError("Unity did not send the command introduction.")
 
-        project_name = str(intro.get("project_name", "")).strip()
+        default_prompt = str(intro.get("default_prompt", "")).strip()
 
         # Connexion 2 : réception indépendante des logs.
         log_reader, log_writer = await asyncio.open_connection(host, log_port)
@@ -138,7 +138,7 @@ async def run_client(host: str, command_port: int, log_port: int) -> None:
 
     # Le dialogue de commande et les logs tournent simultanément,
     # mais sur deux connexions différentes.
-    command_task = asyncio.create_task(command_dialogue(session, command_channel, project_name))
+    command_task = asyncio.create_task(command_dialogue(session, command_channel, default_prompt))
     log_task = asyncio.create_task(log_loop(log_reader))
 
     try:
