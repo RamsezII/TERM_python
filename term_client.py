@@ -85,19 +85,27 @@ async def command_dialogue(session: PromptSession, command_channel: CommandChann
         except EOFError:
             command = "quit"
 
-        # Pendant cette attente, aucun nouveau prompt n'est affiché.
-        # En revanche, log_loop continue sur l'autre connexion.
-        response = await command_channel.request(
-            {
-                "type": "execute",
-                "cmdline": command
-            })
+        while True:
+            # Pendant cette attente, aucun nouveau prompt n'est affiché.
+            # En revanche, log_loop continue sur l'autre connexion.
+            response = await command_channel.request(
+                {
+                    "type": "execute",
+                    "cmdline": command
+                })
 
-        message_type = str(response.get("type", "result"))
+            type = str(response.get("type", "result"))
 
-        if "result" in response:
-            result = str(response.get("result", ""))
-            print_message(message_type, result)
+            if type == "status":
+                progress = float(response.get("progress", 0))
+
+            if type == "result":
+                if "result" in response:
+                    _result = response.get("result")
+                    if _result:
+                        result = str(_result)
+                        print_message(type, result)
+                break
 
 
 async def log_loop(reader: asyncio.StreamReader) -> None:
