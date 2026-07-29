@@ -10,15 +10,15 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 
 
-STYLE = Style.from_dict(
-    {
-        "prompt": "ansicyan bold",
-        "info": "ansiblue",
-        "log": "ansiwhite",
-        "result": "ansigreen",
-        "error": "ansired bold",
-    }
-)
+dict_styles = {
+    "prompt": "ansicyan bold",
+    "info": "ansiblue",
+    "log": "ansiwhite",
+    "result": "ansigreen",
+    "error": "ansired bold",
+}
+
+STYLE = Style.from_dict(dict_styles)
 
 
 async def send_json(writer: asyncio.StreamWriter, message: dict) -> None:
@@ -94,9 +94,10 @@ async def command_dialogue(session: PromptSession, command_channel: CommandChann
             })
 
         message_type = str(response.get("type", "result"))
-        text = str(response.get("text", ""))
-        if text:
-            print_message(message_type, text)
+
+        if "result" in response:
+            result = str(response.get("result", ""))
+            print_message(message_type, result)
 
 
 async def log_loop(reader: asyncio.StreamReader) -> None:
@@ -104,10 +105,8 @@ async def log_loop(reader: asyncio.StreamReader) -> None:
     while True:
         message = await read_json(reader)
         message_type = str(message.get("type", "log"))
-        text = str(message.get("text", ""))
-
-        if text:
-            print_message(message_type, text)
+        text = str(message.get("message", ""))
+        print_message(message_type, text)
 
 
 async def run_client(host: str, command_port: int, log_port: int) -> None:
@@ -162,7 +161,7 @@ def print_message(message_type: str, text: str) -> None:
     from prompt_toolkit import print_formatted_text
 
     style = message_type
-    if style not in {"prompt", "info", "log", "result", "error"}:
+    if style not in dict_styles:
         style = "info"
 
     escaped = (
