@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 
+import comm
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
@@ -36,6 +37,17 @@ async def read_json(reader: asyncio.StreamReader) -> dict:
     return json.loads(raw.decode("utf-8"))
 
 
+async def close_writer(writer) -> None:
+    if writer is None:
+        return
+
+    try:
+        writer.close()
+        await writer.wait_closed()
+    except (ConnectionError, OSError):
+        pass
+
+
 class CommandChannel:
     """Dialogue ordonné requête/réponse sur la connexion de commande."""
 
@@ -50,6 +62,17 @@ class CommandChannel:
         async with self.lock:
             await send_json(self.writer, message)
             return await read_json(self.reader)
+
+    async def request_stream(self, message: dict):
+        async with self.lock:
+            await send_json(self.writer, message)
+
+            while True:
+                response = await read_json(self.reader)
+                yield response
+
+                if str(response.get("type", "")) != "status":
+                    break
 
 
 class UnityCompleter(Completer):
@@ -75,37 +98,49 @@ class UnityCompleter(Completer):
         return []
 
 
-async def command_dialogue(session: PromptSession, command_channel: CommandChannel, project_name: str) -> None:
+async def command_dialogue(session: PromptSession, command_channel: CommandChannel, default_prompt: str) -> None:
     """Affiche le prompt, exécute avec ENTRÉE, puis attend le résultat."""
     while True:
         try:
-            command = await session.prompt_async(make_prompt(project_name))
-        except KeyboardInterrupt:
-            continue
-        except EOFError:
-            command = "quit"
+            command = await session.prompt_async(make_prompt(default_prompt))
+        except (KeyboardInterrupt, EOFError):
+            return
 
-        while True:
-            # Pendant cette attente, aucun nouveau prompt n'est affiché.
-            # En revanche, log_loop continue sur l'autre connexion.
-            response = await command_channel.request(
+        if command.strip().lower() in {"quit", "exit"}:
+            return
+
+        if not command:
+            continue
+
+        # Pendant cette attente, aucun nouveau prompt n'est affiché.
+        # En revanche, log_loop continue sur l'autre connexion.
+        async for response in command_channel.request_stream(
                 {
                     "type": "execute",
                     "cmdline": command
-                })
+                }):
+            message_type = str(response.get("type", "error"))
 
-            type = str(response.get("type", "result"))
+            if message_type == "status":
+                prompt = str(response.get("prompt", "")).strip()
+                if prompt:
+                    print_message("prompt", prompt)
 
-            if type == "status":
-                progress = float(response.get("progress", 0))
+            elif message_type == "result":
+                result = response.get("result")
+                if result:
+                    print_message("result", str(result))
 
-            if type == "result":
-                if "result" in response:
-                    _result = response.get("result")
-                    if _result:
-                        result = str(_result)
-                        print_message(type, result)
-                break
+            elif message_type in {"error", "exception"}:
+                message = str(response.get("message", "")).strip() or "Unknown Unity error."
+                print_message("error", message)
+
+                stacktrace = str(response.get("stacktrace", "")).strip()
+                if stacktrace:
+                    print_message("error", stacktrace)
+
+            else:
+                print_message("error", f"Unexpected Unity response type: {message_type}")
 
 
 async def log_loop(reader: asyncio.StreamReader) -> None:
@@ -129,14 +164,12 @@ async def run_client(host: str, command_port: int, log_port: int) -> None:
         if intro.get("type") != "intro":
             raise ConnectionError("Unity did not send the command introduction.")
 
-        default_prompt = str(intro.get("default_prompt", "")).strip()
+        default_prompt = str(intro.get("default_prompt", "")).strip() or "term"
 
         # Connexion 2 : réception indépendante des logs.
         log_reader, log_writer = await asyncio.open_connection(host, log_port)
     except (OSError, ConnectionError, json.JSONDecodeError) as error:
-        if command_writer is not None:
-            command_writer.close()
-            await command_writer.wait_closed()
+        await close_writer(command_writer)
 
         print_message("error", f"Connection failed: {error}")
         return
@@ -166,9 +199,7 @@ async def run_client(host: str, command_port: int, log_port: int) -> None:
         print_message("error", str(error))
 
     finally:
-        command_writer.close()
-        log_writer.close()
-        await asyncio.gather(command_writer.wait_closed(), log_writer.wait_closed(), return_exceptions=True)
+        await asyncio.gather(close_writer(command_writer), close_writer(log_writer))
 
 
 def escape_html(text: str) -> str:
