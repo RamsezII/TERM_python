@@ -46,9 +46,9 @@ class CommandChannel:
         # Une seule requête à la fois : sa prochaine réponse lui appartient.
         self.lock = asyncio.Lock()
 
-    async def request(self, request_type: str, text: str) -> dict:
+    async def request(self, message: dict) -> dict:
         async with self.lock:
-            await send_json(self.writer, {"type": request_type, "text": text})
+            await send_json(self.writer, message)
             return await read_json(self.reader)
 
 
@@ -59,8 +59,12 @@ class UnityCompleter(Completer):
         self.command_channel = command_channel
 
     async def get_completions_async(self, document: Document, complete_event):
-        text = document.text_before_cursor
-        response = await self.command_channel.request("complete", text)
+        response = await self.command_channel.request(
+            {
+                "type": "complete",
+                "cmdline": document.text,
+                "cursor": document.cursor_position
+            })
 
         word = document.get_word_before_cursor()
         for candidate in response.get("candidates", []):
@@ -83,7 +87,11 @@ async def command_dialogue(session: PromptSession, command_channel: CommandChann
 
         # Pendant cette attente, aucun nouveau prompt n'est affiché.
         # En revanche, log_loop continue sur l'autre connexion.
-        response = await command_channel.request("execute", command)
+        response = await command_channel.request(
+            {
+                "type": "execute",
+                "cmdline": command
+            })
 
         message_type = str(response.get("type", "result"))
         text = str(response.get("text", ""))
