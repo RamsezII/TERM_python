@@ -75,11 +75,11 @@ class UnityCompleter(Completer):
         return []
 
 
-async def command_dialogue(session: PromptSession, command_channel: CommandChannel) -> None:
+async def command_dialogue(session: PromptSession, command_channel: CommandChannel, project_name: str) -> None:
     """Affiche le prompt, exécute avec ENTRÉE, puis attend le résultat."""
     while True:
         try:
-            command = await session.prompt_async(HTML("<prompt>term&gt; </prompt>"))
+            command = await session.prompt_async(make_prompt(project_name))
         except KeyboardInterrupt:
             continue
         except EOFError:
@@ -116,10 +116,16 @@ async def run_client(host: str, command_port: int, log_port: int) -> None:
     try:
         # Connexion 1 : TAB, exécution et réponses.
         command_reader, command_writer = await asyncio.open_connection(host, command_port)
+        intro = await read_json(command_reader)
+
+        if intro.get("type") != "intro":
+            raise ConnectionError("Unity did not send the command introduction.")
+
+        project_name = str(intro.get("project_name", "")).strip()
 
         # Connexion 2 : réception indépendante des logs.
         log_reader, log_writer = await asyncio.open_connection(host, log_port)
-    except OSError as error:
+    except (OSError, ConnectionError, json.JSONDecodeError) as error:
         if command_writer is not None:
             command_writer.close()
             await command_writer.wait_closed()
@@ -132,7 +138,7 @@ async def run_client(host: str, command_port: int, log_port: int) -> None:
 
     # Le dialogue de commande et les logs tournent simultanément,
     # mais sur deux connexions différentes.
-    command_task = asyncio.create_task(command_dialogue(session, command_channel))
+    command_task = asyncio.create_task(command_dialogue(session, command_channel, project_name))
     log_task = asyncio.create_task(log_loop(log_reader))
 
     try:
@@ -157,6 +163,14 @@ async def run_client(host: str, command_port: int, log_port: int) -> None:
         await asyncio.gather(command_writer.wait_closed(), log_writer.wait_closed(), return_exceptions=True)
 
 
+def escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def make_prompt(text: str) -> HTML:
+    return HTML(f"<prompt>{escape_html(text)}&gt; </prompt>")
+
+
 def print_message(message_type: str, text: str) -> None:
     from prompt_toolkit import print_formatted_text
 
@@ -164,11 +178,7 @@ def print_message(message_type: str, text: str) -> None:
     if style not in dict_styles:
         style = "info"
 
-    escaped = (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    escaped = escape_html(text)
     print_formatted_text(HTML(f"<{style}>{escaped}</{style}>"), style=STYLE)
 
 
