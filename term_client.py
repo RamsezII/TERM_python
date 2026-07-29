@@ -4,7 +4,7 @@ import json
 
 import comm
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.completion import Completer, Completion, DummyCompleter
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -20,6 +20,7 @@ dict_styles = {
 }
 
 STYLE = Style.from_dict(dict_styles)
+NO_COMPLETION = DummyCompleter()
 
 
 async def send_json(writer: asyncio.StreamWriter, message: dict) -> None:
@@ -60,19 +61,14 @@ class CommandChannel:
 
     async def request(self, message: dict) -> dict:
         async with self.lock:
-            await send_json(self.writer, message)
-            return await read_json(self.reader)
+            await self.send(message)
+            return await self.receive()
 
-    async def request_stream(self, message: dict):
-        async with self.lock:
-            await send_json(self.writer, message)
+    async def send(self, message: dict) -> None:
+        await send_json(self.writer, message)
 
-            while True:
-                response = await read_json(self.reader)
-                yield response
-
-                if str(response.get("type", "")) != "status":
-                    break
+    async def receive(self) -> dict:
+        return await read_json(self.reader)
 
 
 class UnityCompleter(Completer):
@@ -100,44 +96,59 @@ class UnityCompleter(Completer):
 
 async def command_dialogue(session: PromptSession, command_channel: CommandChannel, default_prompt: str) -> None:
     """Affiche le prompt, exécute avec ENTRÉE, puis attend le résultat."""
+    root_completer = session.completer
+
     while True:
         try:
-            command = await session.prompt_async(make_prompt(default_prompt))
+            command = await session.prompt_async(make_prompt(default_prompt), completer=root_completer)
         except (KeyboardInterrupt, EOFError):
             return
 
         if not command:
             continue
 
-        # Pendant cette attente, aucun nouveau prompt n'est affiché.
-        # En revanche, log_loop continue sur l'autre connexion.
-        async for response in command_channel.request_stream(
-                {
-                    "type": "execute",
-                    "cmdline": command
-                }):
-            type = str(response.get("type", "error"))
+        # Cette connexion reste réservée à la commande jusqu'à son résultat.
+        # Les logs continuent sur leur propre connexion.
+        async with command_channel.lock:
+            await command_channel.send({"type": "execute", "cmdline": command})
 
-            if type == "prompt":
-                prompt = str(response.get("prompt", "")).strip()
-                if prompt:
-                    print_message("prompt", prompt)
+            while True:
+                response = await command_channel.receive()
+                message_type = str(response.get("type", "error"))
 
-            elif type == "result":
-                result = response.get("result")
-                if result:
-                    print_message("result", str(result))
+                if message_type == "prompt":
+                    prompt = str(response.get("prompt", "")).strip()
 
-            elif type in {"error", "exception"}:
-                message = str(response.get("message", "")).strip() or "Unknown Unity error."
-                print_message("error", message)
+                    try:
+                        user_input = await session.prompt_async(make_prompt(prompt), completer=NO_COMPLETION)
+                    except (KeyboardInterrupt, EOFError):
+                        return
 
-                stacktrace = str(response.get("stacktrace", "")).strip()
-                if stacktrace:
-                    print_message("error", stacktrace)
+                    await command_channel.send({"type": "input", "cmdline": user_input})
 
-            else:
-                print_message("error", f"Unexpected Unity response type: {type}")
+                elif message_type == "status":
+                    message = str(response.get("message", "")).strip()
+                    if message:
+                        print_message("info", message)
+
+                elif message_type == "result":
+                    result = response.get("result")
+                    if result:
+                        print_message("result", str(result))
+                    break
+
+                elif message_type in {"error", "exception"}:
+                    message = str(response.get("message", "")).strip() or "Unknown Unity error."
+                    print_message("error", message)
+
+                    stacktrace = str(response.get("stacktrace", "")).strip()
+                    if stacktrace:
+                        print_message("error", stacktrace)
+                    break
+
+                else:
+                    print_message("error", f"Unexpected Unity response type: {message_type}")
+                    break
 
 
 async def log_loop(reader: asyncio.StreamReader) -> None:
