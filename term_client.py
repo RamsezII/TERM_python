@@ -106,9 +106,6 @@ async def command_dialogue(session: PromptSession, command_channel: CommandChann
         except (KeyboardInterrupt, EOFError):
             return
 
-        if command.strip().lower() in {"quit", "exit"}:
-            return
-
         if not command:
             continue
 
@@ -121,7 +118,7 @@ async def command_dialogue(session: PromptSession, command_channel: CommandChann
                 }):
             type = str(response.get("type", "error"))
 
-            if type == "status":
+            if type == "prompt":
                 prompt = str(response.get("prompt", "")).strip()
                 if prompt:
                     print_message("prompt", prompt)
