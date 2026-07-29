@@ -119,19 +119,19 @@ async def command_dialogue(session: PromptSession, command_channel: CommandChann
                     "type": "execute",
                     "cmdline": command
                 }):
-            message_type = str(response.get("type", "error"))
+            type = str(response.get("type", "error"))
 
-            if message_type == "status":
+            if type == "status":
                 prompt = str(response.get("prompt", "")).strip()
                 if prompt:
                     print_message("prompt", prompt)
 
-            elif message_type == "result":
+            elif type == "result":
                 result = response.get("result")
                 if result:
                     print_message("result", str(result))
 
-            elif message_type in {"error", "exception"}:
+            elif type in {"error", "exception"}:
                 message = str(response.get("message", "")).strip() or "Unknown Unity error."
                 print_message("error", message)
 
@@ -140,7 +140,7 @@ async def command_dialogue(session: PromptSession, command_channel: CommandChann
                     print_message("error", stacktrace)
 
             else:
-                print_message("error", f"Unexpected Unity response type: {message_type}")
+                print_message("error", f"Unexpected Unity response type: {type}")
 
 
 async def log_loop(reader: asyncio.StreamReader) -> None:
