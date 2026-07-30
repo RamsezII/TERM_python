@@ -135,8 +135,14 @@ def main() -> int:
     print(f"Building {APP_NAME} for {platform.system()} {platform.machine()}...")
     subprocess.run(command, cwd=ROOT, check=True)
 
+    generated_name = f"{APP_NAME}.exe" if sys.platform == "win32" else APP_NAME
+    generated_executable = output / APP_NAME / generated_name if arguments.onedir else output / generated_name
     executable_name = f"{APP_NAME}.exe" if sys.platform == "win32" else f"{APP_NAME}.x86_64"
     executable = output / APP_NAME / executable_name if arguments.onedir else output / executable_name
+
+    if generated_executable != executable:
+        generated_executable.replace(executable)
+
     print(f"Built: {executable}")
     return 0
 

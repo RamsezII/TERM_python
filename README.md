@@ -32,7 +32,7 @@ Cette commande crée `.venv` si nécessaire, installe les dépendances de build 
 se relance automatiquement avec le Python isolé. Les paquets installés globalement
 sur la machine ne sont donc pas inclus accidentellement dans l'exécutable.
 
-Le résultat est `dist/unity-term.exe` sous Windows et `dist/unity-term` sous Linux.
+Le résultat est `dist/unity-term.exe` sous Windows et `dist/unity-term.x86_64` sous Linux.
 PyInstaller construit pour le système sur lequel il est lancé : il faut donc exécuter
 le script une fois sous Windows et une fois sous Linux pour produire les deux versions.
 
@@ -42,8 +42,6 @@ Pour un build plus facile à inspecter pendant le débogage :
 python build.py --onedir
 ```
 
-Dans l'éditeur Unity, le lanceur cherche automatiquement le binaire dans le dépôt
-frère `TERM_python/dist`. Dans un jeu construit, placez-le dans un dossier `TERM`
-à côté de l'exécutable du jeu. Le chemin peut aussi être défini dans
-`terminal_executable` (relatif à la racine du projet/jeu) ou dans la variable
-d'environnement `TERM_CLIENT_PATH`.
+Dans l'éditeur Unity, le lanceur utilise le binaire correspondant à la plateforme
+dans `Assets/_TERM_/Editor/Binaries`. Lors du build du jeu, le postprocesseur Unity
+copie automatiquement ce binaire dans le dossier d'outils attendu par le jeu.
