@@ -135,7 +135,7 @@ def main() -> int:
     print(f"Building {APP_NAME} for {platform.system()} {platform.machine()}...")
     subprocess.run(command, cwd=ROOT, check=True)
 
-    executable_name = f"{APP_NAME}.exe" if sys.platform == "win32" else APP_NAME
+    executable_name = f"{APP_NAME}.exe" if sys.platform == "win32" else f"{APP_NAME}.x86_64"
     executable = output / APP_NAME / executable_name if arguments.onedir else output / executable_name
     print(f"Built: {executable}")
     return 0
