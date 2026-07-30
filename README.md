@@ -3,16 +3,34 @@
 ## Lancer depuis Python
 
 ```text
-python -m pip install -r requirements.txt
 python term_client.py
 ```
+
+Au premier build, le projet crée automatiquement un environnement Python isolé
+dans `.venv` et y installe uniquement ses dépendances. VS Code détecte ce dossier
+et l'utilise comme interpréteur par défaut.
+
+Pour activer manuellement cet environnement dans un autre terminal :
+
+```text
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+
+# Linux
+source .venv/bin/activate
+```
+
+La commande `deactivate` permet ensuite de quitter l'environnement.
 
 ## Construire l'exécutable
 
 ```text
-python -m pip install -r requirements-build.txt
 python build.py
 ```
+
+Cette commande crée `.venv` si nécessaire, installe les dépendances de build puis
+se relance automatiquement avec le Python isolé. Les paquets installés globalement
+sur la machine ne sont donc pas inclus accidentellement dans l'exécutable.
 
 Le résultat est `dist/unity-term.exe` sous Windows et `dist/unity-term` sous Linux.
 PyInstaller construit pour le système sur lequel il est lancé : il faut donc exécuter
