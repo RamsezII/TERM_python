@@ -4,7 +4,7 @@ import json
 
 import comm
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, Completion, DummyCompleter
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -20,7 +20,6 @@ dict_styles = {
 }
 
 STYLE = Style.from_dict(dict_styles)
-NO_COMPLETION = DummyCompleter()
 
 
 async def send_json(writer: asyncio.StreamWriter, message: dict) -> None:
@@ -59,10 +58,25 @@ class CommandChannel:
         # Une seule requête à la fois : sa prochaine réponse lui appartient.
         self.lock = asyncio.Lock()
 
-    async def request(self, message: dict) -> dict:
-        async with self.lock:
-            await self.send(message)
-            return await self.receive()
+    async def request(self, message: dict, use_lock: bool = True) -> dict:
+        if use_lock:
+            async with self.lock:
+                return await self._request(message)
+
+        return await self._request(message)
+
+    async def _request(self, message: dict) -> dict:
+        await self.send(message)
+        receive_task = asyncio.create_task(self.receive())
+
+        try:
+            return await asyncio.shield(receive_task)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(receive_task)
+            except Exception:
+                pass
+            raise
 
     async def send(self, message: dict) -> None:
         await send_json(self.writer, message)
@@ -74,20 +88,28 @@ class CommandChannel:
 class UnityCompleter(Completer):
     """Quand TAB est pressé, demande les propositions à Unity."""
 
-    def __init__(self, command_channel: CommandChannel) -> None:
+    def __init__(self, command_channel: CommandChannel, use_lock: bool = True) -> None:
         self.command_channel = command_channel
+        self.use_lock = use_lock
 
     async def get_completions_async(self, document: Document, complete_event):
-        response = await self.command_channel.request(
-            {
-                "type": "complete",
-                "cmdline": document.text,
-                "cursor": document.cursor_position
-            })
+        response = await self.command_channel.request({
+            "type": "complete",
+            "cmdline": document.text,
+            "cursor": document.cursor_position
+        }, use_lock=self.use_lock)
 
-        word = document.get_word_before_cursor()
-        for candidate in response.get("candidates", []):
-            yield Completion(str(candidate), start_position=-len(word))
+        if str(response.get("type", "")) != "completion":
+            return
+
+        try:
+            start = int(response.get("start", document.cursor_position))
+        except (TypeError, ValueError):
+            start = document.cursor_position
+
+        start = max(0, min(start, document.cursor_position))
+        for candidate in response.get("candidates", []) or []:
+            yield Completion(str(candidate), start_position=start - document.cursor_position)
 
     def get_completions(self, document: Document, complete_event):
         # prompt_toolkit demande cette méthode, mais nous utilisons sa version async.
@@ -97,11 +119,14 @@ class UnityCompleter(Completer):
 async def command_dialogue(session: PromptSession, command_channel: CommandChannel, default_prompt: str) -> None:
     """Affiche le prompt, exécute avec ENTRÉE, puis attend le résultat."""
     root_completer = session.completer
+    prompt_completer = UnityCompleter(command_channel, use_lock=False)
 
     while True:
         try:
             command = await session.prompt_async(make_prompt(default_prompt), completer=root_completer)
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt:
+            continue
+        except EOFError:
             return
 
         if not command:
@@ -120,8 +145,12 @@ async def command_dialogue(session: PromptSession, command_channel: CommandChann
                     prompt = str(response.get("prompt", "")).strip()
 
                     try:
-                        user_input = await session.prompt_async(make_prompt(prompt), completer=NO_COMPLETION)
-                    except (KeyboardInterrupt, EOFError):
+                        user_input = await session.prompt_async(make_prompt(prompt), completer=prompt_completer)
+                    except KeyboardInterrupt:
+                        await command_channel.send({"type": "cancel"})
+                        continue
+                    except EOFError:
+                        await command_channel.send({"type": "cancel"})
                         return
 
                     await command_channel.send({"type": "input", "cmdline": user_input})
@@ -135,6 +164,9 @@ async def command_dialogue(session: PromptSession, command_channel: CommandChann
                     result = response.get("result")
                     if result:
                         print_message("result", str(result))
+                    break
+
+                elif message_type == "cancelled":
                     break
 
                 elif message_type in {"error", "exception"}:
