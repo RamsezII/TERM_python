@@ -99,7 +99,18 @@ class UnityCompleter(Completer):
             "cursor": document.cursor_position
         }, use_lock=self.use_lock)
 
-        if str(response.get("type", "")) != "completion":
+        response_type = str(response.get("type", ""))
+
+        if response_type == "exception":
+            message = str(response.get("message", "")).strip() or "Unity completion failed."
+            print_message("error", message)
+
+            stacktrace = str(response.get("stacktrace", "")).strip()
+            if stacktrace:
+                print_message("error", stacktrace)
+            return
+
+        if response_type != "completion":
             return
 
         try:
